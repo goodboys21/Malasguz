@@ -1,33 +1,47 @@
 const express = require("express");
 const multer = require("multer");
-const sqlite3 = require("sqlite3").verbose();
 const fs = require("fs");
 const axios = require("axios");
 const FormData = require("form-data");
 const path = require("path");
+const { Pool } = require("pg");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Setup Database
-const db = new sqlite3.Database("./database/db.sqlite", (err) => {
-    if (err) console.error(err);
-    db.run(`CREATE TABLE IF NOT EXISTS files (id INTEGER PRIMARY KEY, filename TEXT, url TEXT)`);
+// 🔗 Setup Database (PostgreSQL Neon.tech)
+const pool = new Pool({
+    connectionString: "postgresql://neondb_owner:npg_ceX6ROk3izuI@ep-plain-recipe-a8068fa1-pooler.eastus2.azure.neon.tech/neondb?sslmode=require",
+    ssl: { rejectUnauthorized: false }
 });
 
-// Setup Storage
+// Cek koneksi ke database
+pool.connect()
+    .then(() => console.log("✅ Connected to Neon.tech"))
+    .catch(err => console.error("❌ Connection error:", err));
+
+// Buat tabel jika belum ada
+pool.query(`
+    CREATE TABLE IF NOT EXISTS files (
+        id SERIAL PRIMARY KEY,
+        filename TEXT NOT NULL,
+        url TEXT NOT NULL
+    )
+`);
+
+// 📂 Setup Storage
 const upload = multer({
     dest: "public/uploads/",
-    limits: { fileSize: 100 * 1024 * 1024 }, // Max 100MB
+    limits: { fileSize: 100 * 1024 * 1024 } // Max 100MB
 });
 
-// Konfigurasi Telegram
+// 🔔 Konfigurasi Telegram
 const TELEGRAM_BOT_TOKEN = "7588173239:AAFIFwsZ8TbGGFQ1L7L0siJJW0LK-KExNr8";  // Ganti dengan token bot
 const TELEGRAM_CHAT_ID = "7081489041"; // Ganti dengan ID pemilik web
 
-// Fungsi kirim notifikasi Telegram
+// 📨 Fungsi kirim notifikasi Telegram
 async function sendTelegramNotification(fileUrl, filename, count) {
-    const caption = `⛈️Uploader  Baru Icibos ⛈️
+    const caption = `⛈️Uploader Baru Icibos ⛈️
     
 🔗 Result: ${fileUrl}
 📁 Urutan: ${count}
@@ -42,40 +56,42 @@ from : cdn.baguss.web.id`;
 
     await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, formData, {
         headers: { ...formData.getHeaders() }
-    }).catch(err => console.error("Gagal kirim Telegram:", err));
+    }).catch(err => console.error("❌ Gagal kirim Telegram:", err));
 }
 
-// Middleware
+// 🌍 Middleware
 app.set("view engine", "ejs");
 app.use(express.static("public"));
 
-// Halaman utama
-app.get("/", (req, res) => {
-    db.all("SELECT * FROM files ORDER BY id DESC", (err, files) => {
-        if (err) return res.status(500).send(err);
-        res.render("index", { files });
-    });
+// 🏠 Halaman utama
+app.get("/", async (req, res) => {
+    try {
+        const result = await pool.query("SELECT * FROM files ORDER BY id DESC");
+        res.render("index", { files: result.rows });
+    } catch (err) {
+        res.status(500).send(err);
+    }
 });
 
-// Upload file
-app.post("/upload", upload.single("file"), (req, res) => {
+// 📤 Upload file
+app.post("/upload", upload.single("file"), async (req, res) => {
     const file = req.file;
-    if (!file) return res.status(400).send("File tidak ditemukan!");
+    if (!file) return res.status(400).send("❌ File tidak ditemukan!");
 
     const fileUrl = `https://cdn-bagus.vercel.app/uploads/${file.filename}`;
 
-    db.run("INSERT INTO files (filename, url) VALUES (?, ?)", [file.filename, fileUrl], function(err) {
-        if (err) return res.status(500).send(err);
+    try {
+        await pool.query("INSERT INTO files (filename, url) VALUES ($1, $2)", [file.filename, fileUrl]);
 
-        db.get("SELECT COUNT(*) as count FROM files", async (err, row) => {
-            if (err) return console.error("Gagal hitung file:", err);
+        const countResult = await pool.query("SELECT COUNT(*) as count FROM files");
+        const fileCount = countResult.rows[0].count;
 
-            const fileCount = row.count;
-            await sendTelegramNotification(fileUrl, file.filename, fileCount);
-            res.redirect("/");
-        });
-    });
+        await sendTelegramNotification(fileUrl, file.filename, fileCount);
+        res.redirect("/");
+    } catch (err) {
+        res.status(500).send(err);
+    }
 });
 
-// Jalankan server
+// 🚀 Jalankan server
 app.listen(PORT, () => console.log(`🚀 Server jalan di http://localhost:${PORT}`));
